@@ -9,6 +9,7 @@ import json
 import requests
 import openai
 from abc import ABC, abstractmethod
+from transformers import pipeline
 from typing import Dict, List, Optional, Any, Union, Tuple
 from .inference_auth_token import get_access_token
 
@@ -324,6 +325,104 @@ class vllmLLM(LLMInterface):
             return parsed_response, prompt_tokens, completion_tokens
         except Exception as e:
             raise ValueError(f"Failed to parse JSON response: {e}. Response was: {response.choices[0].message.content}")
+
+
+class huggingfaceLLM(LLMInterface):
+    """Implementation for hugging face API."""
+
+    def __init__(self, api_key: Optional[str] = None, model: str = "openai/gpt-oss-120b", model_adapter: Optional[Dict] = None):
+        """
+        Initialize the OpenAI LLM interface.
+
+        Args:
+            api_key: no longer used, kept for compatibility
+            model: Model identifier to use
+            model_adapter: Optional configuration for model adaptation
+        """
+        super().__init__(model, model_adapter)
+
+        self.model_adapter = model_adapter
+
+        self.client = pipeline(
+            "text-generation",
+            model=model,
+            torch_dtype="auto",
+            device_map="auto"  # Automatically place on available GPUs
+        )
+
+    def generate(self, prompt: str, system_prompt: Optional[str] = None,
+                 temperature: float = 0.7, max_tokens: int = 1024) -> str:
+        """Generate a response from OpenAI."""
+        messages = []
+
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        messages.append({"role": "user", "content": prompt})
+
+        response = self.client(
+            messages,
+            temperature=temperature,
+            max_new_tokens=max_tokens,
+        )
+
+        last_message = response[0]['generated_text'][-1]
+        # final_content = last_message.get('content', last_message.get('reasoning_content'))
+
+        return last_message
+
+
+    def generate_reponse(self, prompt: str, system_prompt: Optional[str] = None,
+                 temperature: float = 0.7, max_tokens: int = 1024) -> str:
+        """Generate a response from OpenAI."""
+        if system_prompt is None:
+            system_prompt = "No reasoning. Final answer only."
+        else:
+            system_prompt = system_prompt + "No reasoning. Final answer only."
+        response = self.generate(prompt, system_prompt, temperature, max_tokens)
+
+        return response
+
+    def generate_with_json_output(self, prompt: str, json_schema: Dict,
+                                 system_prompt: Optional[str] = None,
+                                 temperature: float = 0.7, max_tokens: int = 1024) -> Tuple[Dict, int, int]:
+        """Generate a structured JSON response from OpenAI."""
+        schema_prompt = f"""
+        Your response must be formatted as a JSON object according to this schema:
+        {json_schema}
+
+        Ensure your response can be parsed by Python's json.loads().
+        """
+
+        system_prompt = system_prompt or schema_prompt
+
+        response = self.generate_reponse(prompt, system_prompt, temperature, max_tokens)
+
+        # Extract JSON string and parse
+        try:
+            parsed_response = parse_hf_json_response(response['content'])
+
+            # Get token counts from OpenAI response
+            prompt_tokens = 0 # response.usage.prompt_tokens
+            completion_tokens = 0 # response.usage.completion_tokens
+
+            self.total_calls += 1
+            self.total_prompt_tokens += prompt_tokens
+            self.total_completion_tokens += completion_tokens
+
+            return parsed_response, prompt_tokens, completion_tokens
+        except Exception as e:
+            raise ValueError(f"Failed to parse JSON response: {e}. Response was: {response['content']}")
+
+def parse_hf_json_response(response: str) -> Dict:
+    """Parse a JSON response from Hugging Face LLM output."""
+    if '```json' in response:
+        json_str = response.split('```json')[1].rsplit('```')[0]
+    elif '```' in response:
+        json_str = response.split('```')[1]
+    else:
+        json_str = response.split('assistantfinal')[1].rsplit('```')[0]
+    return json.loads(json_str)
 
 
 
